@@ -2,12 +2,12 @@
   "name": "biznis-boston",
   "version": "1.0.0",
   "description": "BIZNIS Boston — Haitian Business Directory WhatsApp Agent",
-  "main": "src/server.js",
+  "main": "server.js",
   "type": "module",
   "scripts": {
-    "start": "node src/server.js",
-    "dev": "node --watch src/server.js",
-    "test": "node src/test.js"
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node test.js"
   },
   "engines": {
     "node": ">=18.0.0"
