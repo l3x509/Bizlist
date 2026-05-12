@@ -12,7 +12,7 @@ export const config = {
 
   // ── Anthropic ─────────────────────────────────────────────
   anthropic: {
-    model: 'claude-sonnet-4-20250514',
+    model: 'claude-sonnet-4-5',
     maxTokens: 1000,
     apiKey: process.env.ANTHROPIC_API_KEY,
   },
