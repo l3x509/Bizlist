@@ -1,13 +1,7 @@
-# railway.toml
-# ============================================================
-# BIZNIS BOSTON — Railway Deployment Config
-# railway.app reads this file automatically on deploy
-# ============================================================
-
 [build]
 builder = "NIXPACKS"
 
 [deploy]
-startCommand = "npm start"
+startCommand = "node server.js"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
