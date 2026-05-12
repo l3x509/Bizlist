@@ -20,9 +20,6 @@ import {
 import { optOut }                                    from './messages.js';
 
 // ── Process-level crash handlers ──────────────────────────
-// These catch ANY unhandled error or rejected promise and log
-// it before the process exits. Without these, Railway shows
-// "Stopping Container" with no explanation.
 process.on('uncaughtException', (err) => {
   console.error('💥 UNCAUGHT EXCEPTION — process will exit');
   console.error(err);
@@ -34,6 +31,22 @@ process.on('unhandledRejection', (reason, promise) => {
   console.error('Reason:', reason);
   process.exit(1);
 });
+
+// ── Exit interceptor ───────────────────────────────────────
+// Fires for ANY exit — crash, clean, or direct process.exit()
+// This will tell us the exit code and call stack
+process.on('exit', (code) => {
+  console.error(`[Server] ⚠️  Process exiting with code ${code}`);
+});
+
+// Override process.exit to show WHERE it was called from
+// This is the key diagnostic — something is calling process.exit() silently
+const _originalExit = process.exit.bind(process);
+process.exit = (code) => {
+  console.error(`[Server] 🚨 process.exit(${code}) called — stack trace:`);
+  console.trace();
+  _originalExit(code);
+};
 
 // ── Validate environment on startup ───────────────────────
 // Logs exactly which env vars are missing if any
