@@ -238,18 +238,35 @@ app.post('/admin/test', async (req, res) => {
   }
 });
 
-// ── Start Server ──────────────────────────────────────────
-// Log before listen so we know exactly where a crash happens
-console.log(`[Server] Starting on port ${config.port}...`);
+// ── Signal handlers ───────────────────────────────────────
+// Railway sends SIGTERM before SIGKILL when stopping a container.
+// If you see this log, Railway is the one stopping the process —
+// not a crash. Fix: make sure the app listens on process.env.PORT.
+process.on('SIGTERM', () => {
+  console.log('[Server] SIGTERM received — Railway is stopping the container');
+  process.exit(0);
+});
 
-const server = app.listen(config.port, () => {
+process.on('SIGINT', () => {
+  console.log('[Server] SIGINT received — shutting down');
+  process.exit(0);
+});
+
+// ── Start Server ──────────────────────────────────────────
+// Railway sets process.env.PORT automatically.
+// Apps MUST listen on this port or Railway health check fails
+// and it kills the container. Never hardcode port on Railway.
+const PORT = parseInt(process.env.PORT) || config.port || 8080;
+console.log(`[Server] Starting on port ${PORT} (process.env.PORT=${process.env.PORT}, config.port=${config.port})...`);
+
+const server = app.listen(PORT, () => {
   console.log(`
 ╔════════════════════════════════════════╗
 ║         BIZNIS BOSTON v1.0.0           ║
 ║   Haitian Business Directory Agent    ║
 ╠════════════════════════════════════════╣
 ║  Status:  Running                      ║
-║  Port:    ${config.port}                          ║
+║  Port:    ${PORT}                             ║
 ║  Env:     ${config.environment}                ║
 ║  Webhook: POST /webhook                ║
 ║  Health:  GET /                        ║
