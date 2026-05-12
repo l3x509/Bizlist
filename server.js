@@ -19,7 +19,24 @@ import {
 }                                                    from './database.js';
 import { optOut }                                    from './messages.js';
 
+// ── Process-level crash handlers ──────────────────────────
+// These catch ANY unhandled error or rejected promise and log
+// it before the process exits. Without these, Railway shows
+// "Stopping Container" with no explanation.
+process.on('uncaughtException', (err) => {
+  console.error('💥 UNCAUGHT EXCEPTION — process will exit');
+  console.error(err);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('💥 UNHANDLED REJECTION at:', promise);
+  console.error('Reason:', reason);
+  process.exit(1);
+});
+
 // ── Validate environment on startup ───────────────────────
+// Logs exactly which env vars are missing if any
 validateConfig();
 
 const app = express();
@@ -209,7 +226,10 @@ app.post('/admin/test', async (req, res) => {
 });
 
 // ── Start Server ──────────────────────────────────────────
-app.listen(config.port, () => {
+// Log before listen so we know exactly where a crash happens
+console.log(`[Server] Starting on port ${config.port}...`);
+
+const server = app.listen(config.port, () => {
   console.log(`
 ╔════════════════════════════════════════╗
 ║         BIZNIS BOSTON v1.0.0           ║
@@ -223,6 +243,12 @@ app.listen(config.port, () => {
 ║  Debug:   GET /admin/debug             ║
 ╚════════════════════════════════════════╝
   `);
+});
+
+// Catch port-in-use and other listen errors
+server.on('error', (err) => {
+  console.error('💥 Server failed to start:', err);
+  process.exit(1);
 });
 
 export default app;
