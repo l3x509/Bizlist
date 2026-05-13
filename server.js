@@ -1,8 +1,8 @@
 // server.js
 // ============================================================
-// BIZNIS BOSTON — Main Server
-// Express app, Meta webhook verification,
-// incoming message handler, health check.
+// BIZLIST — Main Server
+// Express app, Twilio webhook handler,
+// incoming message processor, health check.
 // ============================================================
 
 import 'dotenv/config';
@@ -33,14 +33,10 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 // ── Exit interceptor ───────────────────────────────────────
-// Fires for ANY exit — crash, clean, or direct process.exit()
-// This will tell us the exit code and call stack
 process.on('exit', (code) => {
   console.error(`[Server] ⚠️  Process exiting with code ${code}`);
 });
 
-// Override process.exit to show WHERE it was called from
-// This is the key diagnostic — something is calling process.exit() silently
 const _originalExit = process.exit.bind(process);
 process.exit = (code) => {
   console.error(`[Server] 🚨 process.exit(${code}) called — stack trace:`);
@@ -49,15 +45,18 @@ process.exit = (code) => {
 };
 
 // ── Validate environment on startup ───────────────────────
-// Logs exactly which env vars are missing if any
 validateConfig();
 
 const app = express();
+
+// ── Body parsers ──────────────────────────────────────────
+// Twilio webhooks: application/x-www-form-urlencoded
+// Admin endpoints: application/json
+// Both coexist — Express picks based on Content-Type header
+app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
 // ── In-memory debug buffer ─────────────────────────────────
-// Stores last 20 raw webhook payloads for /admin/debug
-// Clears on server restart — production diagnostics only
 const debugBuffer = [];
 function pushDebug(payload) {
   debugBuffer.unshift({ time: new Date().toISOString(), payload });
@@ -68,123 +67,83 @@ function pushDebug(payload) {
 app.get('/', (req, res) => {
   res.json({
     status:  'ok',
-    service: 'BIZNIS Boston',
+    service: 'BizList',
     version: '1.0.0',
     time:    new Date().toISOString(),
   });
 });
 
-// ── Meta Webhook Verification ─────────────────────────────
-// Meta sends a GET request when you first set up the webhook.
-// Must respond with the challenge token to verify ownership.
-
+// ── Webhook GET ───────────────────────────────────────────
+// Twilio does not use GET verification like Meta.
+// Kept for health checks and Railway probes.
 app.get('/webhook', (req, res) => {
-  const mode      = req.query['hub.mode'];
-  const token     = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
-
-  if (mode === 'subscribe' && token === config.meta.webhookVerifyToken) {
-    console.log('[Webhook] ✅ Verification successful');
-    res.status(200).send(challenge);
-  } else {
-    console.warn('[Webhook] ❌ Verification failed — token mismatch');
-    console.warn('[Webhook] Received token:', token);
-    res.sendStatus(403);
-  }
+  res.json({ status: 'ok', message: 'BizList webhook active' });
 });
 
 // ── Incoming Message Handler ──────────────────────────────
-// Meta sends a POST for every incoming WhatsApp message.
-// MUST respond 200 immediately — Meta retries if no fast ack.
+// Twilio sends form-encoded POST for every incoming message.
+// Must respond 200 quickly — Twilio retries without fast ack.
 
 app.post('/webhook', async (req, res) => {
 
-  // ── Step 1: Respond to Meta immediately ─────────────────
-  // This must happen before any async work.
-  // If Meta doesn't get 200 within ~5 seconds it retries.
+  // Respond immediately — processing is async
   res.sendStatus(200);
 
-  // ── Step 2: Log raw payload ──────────────────────────────
-  // This is the most important diagnostic line.
-  // If you see this in Railway logs, Meta IS sending POSTs.
-  // If you never see this, the problem is upstream (Meta not sending).
+  // Log raw payload — if you see this, Twilio IS hitting Railway
   console.log('[Webhook] 📨 POST received at', new Date().toISOString());
-  console.log('[Webhook] Raw body:', JSON.stringify(req.body, null, 2));
-
-  // Store in debug buffer for /admin/debug endpoint
+  console.log('[Webhook] Body:', JSON.stringify(req.body, null, 2));
   pushDebug(req.body);
 
   try {
-    // ── Step 3: Extract message ──────────────────────────
-    // Meta sends many non-message events (delivery receipts,
-    // read receipts, status updates). extractMessage() returns
-    // null for all of those — that is expected and normal.
     const message = extractMessage(req.body);
 
     if (!message) {
-      // Log what type of event this was so we know Meta IS delivering
-      const entry   = req.body?.entry?.[0];
-      const changes = entry?.changes?.[0];
-      const field   = changes?.field;
-      const value   = changes?.value;
-
-      if (value?.statuses) {
-        const status = value.statuses[0];
-        console.log(`[Webhook] 📋 Status update: ${status?.status} for message ${status?.id}`);
-      } else {
-        console.log(`[Webhook] ⏭️  Non-message event, field: ${field} — skipping`);
-      }
+      console.log('[Webhook] ⏭️  Non-message event — skipping');
       return;
     }
 
-    // ── Step 4: Process actual message ──────────────────
-    const { from, messageId, type, text, audio } = message;
+    const { from, messageId, type, text } = message;
+    console.log(`[Webhook] 💬 From ...${from.slice(-4)} | type: ${type}`);
 
-    console.log(`[Webhook] 💬 Message from ...${from.slice(-4)} | type: ${type} | id: ${messageId}`);
+    await markAsRead(messageId); // no-op for Twilio
 
-    // Mark message as read (blue checkmarks)
-    await markAsRead(messageId);
-
-    // Anonymize before any DB operations
     const anonymousId = anonymizePhone(from);
 
-    // ── Handle STOP command ─────────────────────────────
+    // ── STOP command ───────────────────────────────────────
     if (text && config.commands.stop.includes(text.trim().toUpperCase())) {
-      console.log(`[Webhook] 🛑 STOP command from ...${from.slice(-4)}`);
+      console.log(`[Webhook] 🛑 STOP from ...${from.slice(-4)}`);
       await optOutUser(anonymousId);
       await sendMessage(from, optOut.creole);
       return;
     }
 
-    // ── Check opt-in status ─────────────────────────────
+    // ── Opt-in check ───────────────────────────────────────
     const optedIn = await isUserOptedIn(anonymousId);
     if (!optedIn) {
-      console.log(`[Webhook] 🔄 Re-subscribing user ${anonymousId}`);
+      console.log(`[Webhook] 🔄 Re-subscribing ...${from.slice(-4)}`);
     }
 
-    // ── Handle audio messages ───────────────────────────
+    // ── Audio ──────────────────────────────────────────────
     if (type === 'audio') {
-      console.log(`[Webhook] 🎤 Audio message — sending not-supported response`);
+      console.log('[Webhook] 🎤 Audio not supported');
       await sendMessage(from, handleAudio('creole'));
       return;
     }
 
-    // ── Handle unsupported message types ────────────────
+    // ── Unsupported type ───────────────────────────────────
     if (type !== 'text' || !text) {
-      console.log(`[Webhook] ⚠️  Unsupported message type: ${type}`);
+      console.log(`[Webhook] ⚠️  Unsupported type: ${type}`);
       return;
     }
 
-    // ── Process text message with AI agent ──────────────
-    console.log(`[Webhook] 🤖 Processing: "${text.slice(0, 60)}..."`);
+    // ── Process with Claude ────────────────────────────────
+    console.log(`[Webhook] 🤖 Processing: "${text.slice(0, 60)}"`);
     const response = await processMessage(text, anonymousId);
     await sendMessage(from, response);
-
     console.log(`[Webhook] ✅ Response sent to ...${from.slice(-4)}`);
 
   } catch (err) {
-    // Log full stack — err.message alone hides too much
-    console.error('[Webhook] ❌ Handler error:', err);
+    console.error('[Webhook] ❌ Error:', err);
   }
 });
 
@@ -199,13 +158,10 @@ function requireAdminKey(req, res) {
   return true;
 }
 
-// Last 20 raw webhook payloads — use this to diagnose Meta issues
+// Last 20 raw webhook payloads — use to diagnose Twilio issues
 app.get('/admin/debug', (req, res) => {
   if (!requireAdminKey(req, res)) return;
-  res.json({
-    count:   debugBuffer.length,
-    buffer:  debugBuffer,
-  });
+  res.json({ count: debugBuffer.length, buffer: debugBuffer });
 });
 
 // Community needs — feeds TwinZile research pipeline
@@ -215,15 +171,15 @@ app.get('/admin/needs', async (req, res) => {
   res.json({ data: needs });
 });
 
-// Business lead report — used for upgrade pitch
+// Business lead report
 app.get('/admin/leads', async (req, res) => {
   if (!requireAdminKey(req, res)) return;
   const report = await getBusinessLeadReport();
   res.json({ data: report });
 });
 
-// Manual test — simulate a message without WhatsApp
-// POST /admin/test with { "from": "15551234567", "text": "doktè kreyòl" }
+// Manual pipeline test — no WhatsApp needed
+// POST /admin/test  { "from": "15551234567", "text": "doktè kreyòl Boston" }
 app.post('/admin/test', async (req, res) => {
   if (!requireAdminKey(req, res)) return;
 
@@ -239,30 +195,24 @@ app.post('/admin/test', async (req, res) => {
 });
 
 // ── Signal handlers ───────────────────────────────────────
-// Railway sends SIGTERM before SIGKILL when stopping a container.
-// If you see this log, Railway is the one stopping the process —
-// not a crash. Fix: make sure the app listens on process.env.PORT.
 process.on('SIGTERM', () => {
-  console.log('[Server] SIGTERM received — Railway is stopping the container');
+  console.log('[Server] SIGTERM received — shutting down gracefully');
   process.exit(0);
 });
 
 process.on('SIGINT', () => {
-  console.log('[Server] SIGINT received — shutting down');
+  console.log('[Server] SIGINT received');
   process.exit(0);
 });
 
 // ── Start Server ──────────────────────────────────────────
-// Railway sets process.env.PORT automatically.
-// Apps MUST listen on this port or Railway health check fails
-// and it kills the container. Never hardcode port on Railway.
 const PORT = parseInt(process.env.PORT) || config.port || 8080;
-console.log(`[Server] Starting on port ${PORT} (process.env.PORT=${process.env.PORT}, config.port=${config.port})...`);
+console.log(`[Server] Starting on port ${PORT}...`);
 
 const server = app.listen(PORT, () => {
   console.log(`
 ╔════════════════════════════════════════╗
-║         BIZNIS BOSTON v1.0.0           ║
+║             BIZLIST v1.0.0             ║
 ║   Haitian Business Directory Agent    ║
 ╠════════════════════════════════════════╣
 ║  Status:  Running                      ║
@@ -275,7 +225,6 @@ const server = app.listen(PORT, () => {
   `);
 });
 
-// Catch port-in-use and other listen errors
 server.on('error', (err) => {
   console.error('💥 Server failed to start:', err);
   process.exit(1);
